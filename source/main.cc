@@ -64,11 +64,20 @@ int doSearch(const ::std::filesystem::path &target,
         // Check type.
         if (! ::std::filesystem::is_directory(searchDir)) {
             if (::std::filesystem::is_symlink(searchDir)) {
-                if (::std::filesystem::absolute(
-                        ::std::filesystem::read_symlink(searchDir))
-                    == target) {
-                    printf("%s\n", searchDir.c_str());
-                    return;
+                try {
+                    auto linkedTo = ::std::filesystem::read_symlink(searchDir);
+                    if (linkedTo.is_absolute()) {
+                        linkedTo = ::std::filesystem::canonical(linkedTo);
+                    } else {
+                        linkedTo = ::std::filesystem::canonical(
+                            searchDir.parent_path() / linkedTo);
+                    }
+                    if (linkedTo == target) {
+                        printf("%s\n", searchDir.c_str());
+                        return;
+                    }
+                } catch (::std::filesystem::filesystem_error &e) {
+                    fprintf(stderr, "%s\n", e.what());
                 }
             } else {
                 return;
@@ -76,22 +85,40 @@ int doSearch(const ::std::filesystem::path &target,
         }
 
         // Search directory.
-        for (auto &entry : ::std::filesystem::directory_iterator(searchDir)) {
-            if (entry.is_symlink()) {
-                // Check.
-                if (::std::filesystem::absolute(
-                        ::std::filesystem::read_symlink(entry.path()))
-                    == target) {
-                    printf("%s\n", searchDir.c_str());
-                    return;
+        try {
+            for (auto &entry :
+                 ::std::filesystem::directory_iterator(searchDir)) {
+                try {
+                    if (entry.is_symlink()) {
+                        // Check.
+                        auto linkedTo
+                            = ::std::filesystem::read_symlink(entry.path());
+
+                        if (linkedTo.is_absolute()) {
+                            linkedTo = ::std::filesystem::canonical(linkedTo);
+                        } else {
+                            linkedTo = ::std::filesystem::canonical(searchDir
+                                                                    / linkedTo);
+                        }
+                        if (linkedTo == target) {
+                            printf("%s\n", entry.path().c_str());
+                            return;
+                        }
+                    } else if (entry.is_directory()
+                               && entry.path().filename() != "."
+                               && entry.path().filename() != "..") {
+                        // Add new task.
+                        ::std::unique_lock<::std::mutex> lock(queueLock);
+                        taskQueue.push(::std::make_unique<SearchTask>(
+                            ::std::ref(target), entry.path()));
+                        queueCond.notify_one();
+                    }
+                } catch (::std::filesystem::filesystem_error &e) {
+                    fprintf(stderr, "%s\n", e.what());
                 }
-            } else if (entry.is_directory()) {
-                // Add new task.
-                ::std::unique_lock<::std::mutex> lock(queueLock);
-                taskQueue.push(::std::make_unique<SearchTask>(
-                    ::std::ref(target), entry.path()));
-                queueCond.notify_one();
             }
+        } catch (::std::filesystem::filesystem_error &e) {
+            fprintf(stderr, "%s\n", e.what());
         }
     };
 
@@ -185,8 +212,8 @@ int main(int argc, char *argv[])
             return 1;
 
         case 2:
-            target    = ::std::filesystem::absolute(argv[optind]);
-            searchDir = ::std::filesystem::absolute(argv[optind + 1]);
+            target    = ::std::filesystem::canonical(argv[optind]);
+            searchDir = ::std::filesystem::canonical(argv[optind + 1]);
             break;
 
         default:
